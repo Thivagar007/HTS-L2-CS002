@@ -1,0 +1,107 @@
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin: 0;
+    height: 100vh;
+    background: linear-gradient(135deg, #FFDEE9, #B5FFFC);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.container {
+    text-align: center;
+    background: white;
+    padding: 30px;
+    border-radius: 20px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+    animation: pop-in 0.5s ease;
+}
+
+@keyframes pop-in {
+    0% { transform: scale(0.9); opacity: 0; }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+h1 {
+    font-size: 2.5em;
+    color: #444;
+    margin-bottom: 10px;
+}
+
+.status {
+    font-size: 1.3em;
+    margin-bottom: 20px;
+    color: #555;
+}
+
+/* Color-coded player turn */
+.player.X {
+    color: #e91e63;
+    font-weight: bold;
+}
+
+.player.O {
+    color: #3f51b5;
+    font-weight: bold;
+}
+
+.board {
+    display: grid;
+    grid-template-columns: repeat(3, 100px);
+    gap: 10px;
+    justify-content: center;
+    margin: 0 auto;
+}
+
+.cell {
+    width: 100px;
+    height: 100px;
+    background-color: #f4f4f4;
+    border-radius: 15px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.5em;
+    font-weight: bold;
+    transition: all 0.2s ease;
+}
+
+.cell:hover {
+    background-color: #e0f7fa;
+    cursor: pointer;
+}
+
+.cell a {
+    text-decoration: none;
+    color: #333;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.cell.X {
+    color: #e91e63;
+}
+
+.cell.O {
+    color: #3f51b5;
+}
+
+.reset {
+    display: inline-block;
+    margin-top: 20px;
+    padding: 10px 20px;
+    font-size: 1em;
+    text-decoration: none;
+    background-color: #3f51b5;
+    color: white;
+    border-radius: 8px;
+    transition: background-color 0.3s;
+}
+
+.reset:hover {
+    background-color: #303f9f;
+}
