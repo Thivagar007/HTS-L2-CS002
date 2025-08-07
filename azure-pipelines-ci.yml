@@ -64,7 +64,7 @@ stages:
     - task: AzureCLI@2
       displayName: 'Upload startup.sh to Azure Blob'
       inputs:
-        azureSubscription: 'MyAzureServiceConnection'
+        azureSubscription: 'HTS-L2-CS002-ARM-SC'  # Replace with your service connection name
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
