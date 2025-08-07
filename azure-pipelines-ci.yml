@@ -49,7 +49,7 @@ stages:
     - task: AzureCLI@2
       displayName: 'Upload Flask app zip to Azure Blob'
       inputs:
-        azureSubscription: 'MyAzureServiceConnection'  # Replace with your service connection name
+        azureSubscription: 'HTS-L2-CS002-ARM-SC'  # Replace with your service connection name
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
