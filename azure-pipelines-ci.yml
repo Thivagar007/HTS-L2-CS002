@@ -4,7 +4,7 @@ trigger:
       - main
 
 pool:
-  name: my-agent-02  # Custom VMSS-based agent pool
+  name: my-agent-2  # Custom VMSS-based agent pool
 
 variables:
   - group: kv-secrets            # Contains: StorageAccountSasToken
