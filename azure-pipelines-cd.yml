@@ -38,4 +38,4 @@ stages:
               targetType: 'inline'
               script: |
                 echo "Connecting to Primary VM at $(PrimaryVmIp)"
-                sshpass -p "$(PrimaryVmPassword)" ssh -o StrictHostKeyChecking=no azureuser@$(PrimaryVmIp) 'bash -s' < startup.sh "$(StorageAccountSasToken)"
+                sshpass -p "$(PrimaryVmPassword)" ssh -o StrictHostKeyChecking=no adminusr@$(PrimaryVmIp) 'bash -s' < startup.sh "$(StorageAccountSasToken)"
