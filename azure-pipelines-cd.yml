@@ -1,6 +1,12 @@
 trigger: none
 pr: none
 
+resources:
+  pipelines:
+    - pipeline: ciPipeline
+      source: Thivagar007.HTS-L2-CS002
+      trigger: true
+
 variables:
   - group: kv-secrets
   - group: deployment-settings
