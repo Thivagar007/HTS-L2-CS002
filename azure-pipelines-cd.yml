@@ -1,0 +1,35 @@
+trigger: none
+pr: none
+
+variables:
+  - group: kv-secrets
+  - group: deployment-settings
+
+pool:
+  name: my-agent-2  # Your VMSS-based agent pool
+
+stages:
+  - stage: DeployToPrimary
+    displayName: "Deploy App to Primary VM"
+    jobs:
+      - job: UploadAndRun
+        displayName: "Run startup.sh on Primary VM"
+        steps:
+
+          # Install Azure CLI, SSH client, and sshpass
+          - task: Bash@3
+            displayName: "Install Azure CLI & SSH tools"
+            inputs:
+              targetType: 'inline'
+              script: |
+                sudo apt-get update
+                sudo apt-get install -y azure-cli openssh-client sshpass
+
+          # Run startup.sh on Primary VM using secrets from Key Vault
+          - task: Bash@3
+            displayName: "Run startup.sh via SSH"
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "Connecting to Primary VM at $(PrimaryVmIp)"
+                sshpass -p "$(PrimaryVmPassword)" ssh -o StrictHostKeyChecking=no azureuser@$(PrimaryVmIp) 'bash -s' < startup.sh "$(StorageAccountSasToken)"
