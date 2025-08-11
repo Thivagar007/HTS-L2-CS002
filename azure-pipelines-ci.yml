@@ -20,6 +20,14 @@ variables:
   - name: blobPrefix
     value: 'flask/$(Build.SourceBranchName)/$(Build.BuildNumber)'
 
+resources:
+  repositories:
+  - repository: self
+    type: github
+    name: Thivagar007/HTS-L2-CS002
+    endpoint: github-hts-l2            # <-- exact service connection name
+    ref: refs/heads/main
+
 stages:
 - stage: Build
   displayName: 'Build & Package'
@@ -27,6 +35,9 @@ stages:
   - job: Build
     displayName: 'Zip Flask app and publish'
     steps:
+      - checkout: self
+        clean: true
+        persistCredentials: true
       - script: |
           set -e
           sudo apt-get update -y
