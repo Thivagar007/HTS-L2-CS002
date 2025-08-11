@@ -3,22 +3,27 @@ trigger:
     include:
       - main
 
-# This matches your current setup
 pool:
   name: my-agent-2   # VMSS-based agent pool
 
 variables:
-  # Variable groups you already use
-  - group: kv-secrets            # must include: StorageAccountSasToken
-  - group: deployment-settings   # must include: storageAccountName, storageContainer
-
-  # Local variables
+  - group: kv-secrets            # StorageAccountSasToken
+  - group: deployment-settings   # storageAccountName, storageContainer
   - name: buildDir
     value: 'build-artifacts'
   - name: artifactName
     value: 'flask-app.zip'
   - name: blobPrefix
     value: 'flask/$(Build.SourceBranchName)/$(Build.BuildNumber)'
+
+# 👉 Explicitly use your GitHub service connection
+resources:
+  repositories:
+  - repository: self
+    type: github
+    name: Thivagar007/HTS-L2-CS002
+    endpoint: github.com_Thivagar007      # exact service connection name
+    ref: refs/heads/main
 
 stages:
 - stage: Build
@@ -27,6 +32,10 @@ stages:
   - job: Build
     displayName: 'Zip Flask app and publish'
     steps:
+      - checkout: self
+        clean: true
+        persistCredentials: true
+
       - script: |
           set -e
           sudo apt-get update -y
@@ -75,7 +84,6 @@ stages:
   jobs:
   - job: Upload
     steps:
-      # 1) Get the files produced in Build stage
       - task: DownloadBuildArtifacts@0
         displayName: 'Download build artifact'
         inputs:
@@ -84,7 +92,6 @@ stages:
           artifactName: 'drop'
           downloadPath: '$(Pipeline.Workspace)/drop'
 
-      # 2) Upload with SAS + temporary firewall allow
       - task: AzureCLI@2
         displayName: 'Upload zip + manifest to Blob (SAS) with temporary firewall allow'
         inputs:
@@ -93,6 +100,8 @@ stages:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
+            # Ensure curl exists on self-hosted agents
+            command -v curl >/dev/null 2>&1 || { sudo apt-get update -y && sudo apt-get install -y curl; }
 
             ACCOUNT="$(storageAccountName)"
             CONTAINER="$(storageContainer)"
