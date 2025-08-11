@@ -22,8 +22,11 @@ resources:
   - repository: self
     type: github
     name: Thivagar007/HTS-L2-CS002
-    endpoint: github.com_Thivagar007      # exact service connection name
+    endpoint: github.com_Thivagar007
     ref: refs/heads/main
+  - checkout: self
+    clean: true
+    persistCredentials: true
 
 stages:
 - stage: Build
