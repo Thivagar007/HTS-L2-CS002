@@ -3,75 +3,118 @@ trigger:
     include:
       - main
 
+# This matches your current setup
 pool:
-  name: my-agent-2  # Custom VMSS-based agent pool
+  name: my-agent-2   # VMSS-based agent pool
 
 variables:
-  - group: kv-secrets            # Contains: StorageAccountSasToken
-  - group: deployment-settings   # Contains: storageAccountName, storageContainer
+  # Variable groups you already use
+  - group: kv-secrets            # must include: StorageAccountSasToken
+  - group: deployment-settings   # must include: storageAccountName, storageContainer
+
+  # Local variables
   - name: buildDir
     value: 'build-artifacts'
   - name: artifactName
     value: 'flask-app.zip'
+  - name: blobPrefix
+    value: 'flask/$(Build.SourceBranchName)/$(Build.BuildNumber)'
 
 stages:
-- stage: BuildAndUpload
-  displayName: 'Build Flask App and Upload to Blob Storage'
+- stage: Build
+  displayName: 'Build & Package'
   jobs:
-  - job: Upload
-    displayName: 'Install Tools, Package App, Upload to Blob'
+  - job: Build
+    displayName: 'Zip Flask app and publish'
     steps:
-    - checkout: self
+      - script: |
+          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y zip
+          echo "Preparing build dir: $(buildDir)"
+          rm -rf "$(buildDir)"
+          mkdir -p "$(buildDir)"
 
-    - task: Bash@3
-      displayName: 'Install zip, curl, Azure CLI'
-      inputs:
-        targetType: 'inline'
-        script: |
-          sudo apt-get update
-          sudo apt-get install -y zip curl
+          # Zip only the app assets we need on the VM
+          zip -r "$(buildDir)/$(artifactName)" app.py templates static
 
-          if ! command -v az &> /dev/null; then
-            echo "Azure CLI not found. Installing..."
-            curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          # (Optional) generate a minimal requirements.txt if not present
+          if [ ! -f requirements.txt ]; then
+            echo "flask" > "$(buildDir)/requirements.txt"
           else
-            echo "Azure CLI is already installed."
+            cp requirements.txt "$(buildDir)/requirements.txt"
           fi
 
-    - task: Bash@3
-      displayName: 'Create zip archive of Flask app'
-      inputs:
-        targetType: 'inline'
-        script: |
-          mkdir -p $(buildDir)
-          zip -r $(buildDir)/$(artifactName) . -x "*.git*" "*.venv*" "__pycache__/*"
+          # Manifest to help CD & audits
+          cat > "$(buildDir)/artifact-info.json" <<EOF
+          {
+            "app":"flask-tictactoe",
+            "artifact":"$(artifactName)",
+            "branch":"$(Build.SourceBranchName)",
+            "buildId":"$(Build.BuildId)",
+            "buildNumber":"$(Build.BuildNumber)",
+            "blobPrefix":"$(blobPrefix)",
+            "storageAccount":"$(storageAccountName)",
+            "container":"$(storageContainer)"
+          }
+          EOF
 
-    - task: AzureCLI@2
-      displayName: 'Upload Flask app zip to Azure Blob'
-      inputs:
-        azureSubscription: 'HTS-L2-CS002-ARM-SC'  # Replace with your service connection name
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          az storage blob upload \
-            --account-name $(storageAccountName) \
-            --container-name $(storageContainer) \
-            --name $(artifactName) \
-            --file $(buildDir)/$(artifactName) \
-            --sas-token "$(StorageAccountSasToken)" \
-            --overwrite
+          ls -la "$(buildDir)"
+        displayName: 'Create zip + manifest'
 
-    - task: AzureCLI@2
-      displayName: 'Upload startup.sh to Azure Blob'
-      inputs:
-        azureSubscription: 'HTS-L2-CS002-ARM-SC'  # Replace with your service connection name
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          az storage blob upload \
-            --account-name $(storageAccountName) \
-            --container-name $(storageContainer) \
-            --name startup.sh \
-            --file startup.sh \
-            --sas-token "$(StorageAccountSasToken)" \
-            --overwrite
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish artifact to pipeline'
+        inputs:
+          PathtoPublish: '$(buildDir)'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
+
+- stage: UploadToBlob
+  displayName: 'Upload to Azure Blob'
+  dependsOn: Build
+  jobs:
+  - job: Upload
+    steps:
+      - task: AzureCLI@2
+        displayName: 'Upload zip + manifest to Blob (SAS)'
+        inputs:
+          azureSubscription: 'HTS-L2-CS002-ARM-SC'   # your service connection
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            echo "Ensuring container exists..."
+            az storage container create \
+              --account-name "$(storageAccountName)" \
+              --name "$(storageContainer)" \
+              --sas-token "$(StorageAccountSasToken)" >/dev/null
+
+            echo "Uploading to $(blobPrefix)/ ..."
+            az storage blob upload \
+              --account-name "$(storageAccountName)" \
+              --container-name "$(storageContainer)" \
+              --name "$(blobPrefix)/$(artifactName)" \
+              --file "$(buildDir)/$(artifactName)" \
+              --sas-token "$(StorageAccountSasToken)" \
+              --overwrite
+
+            az storage blob upload \
+              --account-name "$(storageAccountName)" \
+              --container-name "$(storageContainer)" \
+              --name "$(blobPrefix)/artifact-info.json" \
+              --file "$(buildDir)/artifact-info.json" \
+              --sas-token "$(StorageAccountSasToken)" \
+              --overwrite
+
+            # Upload requirements.txt too
+            az storage blob upload \
+              --account-name "$(storageAccountName)" \
+              --container-name "$(storageContainer)" \
+              --name "$(blobPrefix)/requirements.txt" \
+              --file "$(buildDir)/requirements.txt" \
+              --sas-token "$(StorageAccountSasToken)" \
+              --overwrite
+
+            echo "Done:"
+            echo "https://$(storageAccountName).blob.core.windows.net/$(storageContainer)/$(blobPrefix)/"
