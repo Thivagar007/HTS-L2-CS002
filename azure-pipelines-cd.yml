@@ -12,10 +12,10 @@ variables:
   - group: deployment-settings
   - name: startupScriptName
     value: 'startup.sh'
-  - name: blobPrefix
-    value: 'deployment'  # Added since not in your variable groups
   - name: artifactName
-    value: 'app-bundle.zip'  # Added since not in your variable groups
+    value: 'flask-app.zip'  # Updated to match your container
+  - name: blobPrefix
+    value: ''  # Empty since files are at container root
   - name: retryCount
     value: 3
   - name: retryDelaySeconds
@@ -36,21 +36,19 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          set -euxo pipefail
+          set -eo pipefail
           
-          # Verify required variables are set
           required_vars=(
             "StorageAccountSasToken"
             "PrimaryVmPassword"
             "PrimaryVmlp"
             "storageAccountName"
             "storageContainer"
-            "resourceGroup"
           )
           
           missing_vars=()
           for var in "${required_vars[@]}"; do
-            if [ -z "${!var}" ]; then
+            if [ -z "${!var+x}" ]; then
               missing_vars+=("$var")
             fi
           done
@@ -89,43 +87,29 @@ stages:
           
           # Normalize SAS token
           [[ "$SAS" != \?* ]] && SAS="?${SAS}"
-          echo "##[debug]SAS token normalized"
           
           BASE_URL="https://$(storageAccountName).blob.core.windows.net"
           CONTAINER_URL="${BASE_URL}/$(storageContainer)"
           
-          # Function to validate storage access
-          validate_storage_access() {
-            local url=$1
-            local resource=$2
-            local attempt=1
-            
-            while [ $attempt -le $(retryCount) ]; do
-              status_code=$(curl -s -o /dev/null -w "%{http_code}" "${url}${SAS}")
-              
-              case $status_code in
-                200) echo "OK: $resource accessible"; return 0 ;;
-                404) echo "##[error]$resource not found"; return 1 ;;
-                403) echo "##[error]Access denied to $resource"; return 1 ;;
-                *)   echo "##[warning]$resource check failed (HTTP $status_code)" ;;
-              esac
-              
-              sleep $(retryDelaySeconds)
-              ((attempt++))
-            done
-            
-            echo "##[error]All attempts failed for $resource"
-            return 1
-          }
+          # Verify container access
+          echo "Checking container access..."
+          status_code=$(curl -s -o /dev/null -w "%{http_code}" "${CONTAINER_URL}?restype=container${SAS}")
+          if [ "$status_code" != "200" ]; then
+            echo "##[error]Container access failed (HTTP $status_code)"
+            exit 1
+          fi
           
-          # Validate container access
-          validate_storage_access "${CONTAINER_URL}?restype=container" "Storage Container" || exit 1
+          # Verify files exist (no blobPrefix needed)
+          for file in "$(startupScriptName)" "$(artifactName)"; do
+            echo "Checking $file..."
+            status_code=$(curl -s -o /dev/null -w "%{http_code}" "${CONTAINER_URL}/${file}${SAS}")
+            if [ "$status_code" != "200" ]; then
+              echo "##[error]$file not found (HTTP $status_code)"
+              exit 1
+            fi
+          done
           
-          # Validate startup script exists
-          validate_storage_access "${CONTAINER_URL}/$(blobPrefix)/$(startupScriptName)" "Startup Script" || exit 1
-          
-          # Validate artifact exists
-          validate_storage_access "${CONTAINER_URL}/$(blobPrefix)/$(artifactName)" "Deployment Artifact" || exit 1
+          echo "##[section]All storage resources verified"
 
     - task: Bash@3
       displayName: "Execute Remote Deployment"
@@ -140,7 +124,7 @@ stages:
           KEY_FILE="$(Build.StagingDirectory)/deploy_key"
           ssh-keygen -t rsa -b 4096 -f "$KEY_FILE" -N "" -q
           
-          # Configure SSH for the session
+          # Configure SSH
           SSH_OPTS=(
             "-o StrictHostKeyChecking=no"
             "-o UserKnownHostsFile=/dev/null"
@@ -154,72 +138,56 @@ stages:
             "${SSH_OPTS[@]}" \
             "$(PrimaryVmUser)@$(PrimaryVmlp)"
           
-          # Execute remote deployment script
-          echo "Starting remote deployment..."
+          # Execute remote deployment
+          echo "Starting deployment..."
           ssh "${SSH_OPTS[@]}" \
             "$(PrimaryVmUser)@$(PrimaryVmlp)" \
-            bash -s -- "$SAS" "$(storageAccountName)" "$(storageContainer)" "$(blobPrefix)" "$(startupScriptName)" "$(artifactName)" <<'REMOTE_SCRIPT'
+            bash -s -- "$SAS" "$(storageAccountName)" "$(storageContainer)" "$(startupScriptName)" "$(artifactName)" <<'REMOTE_SCRIPT'
           set -euxo pipefail
           
-          # Parameters from Azure Pipelines
+          # Parameters
           SAS="${1}"
           ACCOUNT="${2}"
           CONTAINER="${3}"
-          PREFIX="${4}"
-          SCRIPT="${5}"
-          ARTIFACT="${6}"
+          SCRIPT="${4}"
+          ARTIFACT="${5}"
           
-          # System configuration
+          # Setup
           TEMP_DIR="/tmp/deployment-$(date +%s)"
           mkdir -p "$TEMP_DIR"
           
-          # Install required packages
+          # Install dependencies if missing
           if ! command -v curl >/dev/null || ! command -v unzip >/dev/null; then
-            echo "Installing dependencies..."
             sudo apt-get update && sudo apt-get install -y curl unzip
           fi
           
-          # Download function with retries
+          # Download files with retries
           download_with_retry() {
             local url="$1"
             local output="$2"
-            local max_attempts=3
-            local delay=5
-            
-            for ((attempt=1; attempt<=max_attempts; attempt++)); do
-              if curl -sSL -o "$output" "${url}${SAS}"; then
-                echo "Download successful"
+            for attempt in {1..3}; do
+              if curl -sSL -o "$output" "$url"; then
                 return 0
               fi
-              echo "Attempt $attempt failed, retrying in $delay seconds..."
-              sleep $delay
+              sleep 5
             done
-            echo "##[error]Failed to download after $max_attempts attempts"
-            return 1
+            echo "##[error]Failed to download after 3 attempts"
+            exit 1
           }
           
-          # Download and execute startup script
-          echo "Downloading startup script..."
-          download_with_retry \
-            "https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}/${PREFIX}/${SCRIPT}" \
-            "${TEMP_DIR}/startup.sh" || exit 1
+          # Download files directly from container root
+          BASE_URL="https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}"
           
+          echo "Downloading ${SCRIPT}..."
+          download_with_retry "${BASE_URL}/${SCRIPT}${SAS}" "${TEMP_DIR}/startup.sh"
           chmod +x "${TEMP_DIR}/startup.sh"
           
-          # Download artifact
-          echo "Downloading application artifact..."
-          download_with_retry \
-            "https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}/${PREFIX}/${ARTIFACT}" \
-            "${TEMP_DIR}/artifact.zip" || exit 1
+          echo "Downloading ${ARTIFACT}..."
+          download_with_retry "${BASE_URL}/${ARTIFACT}${SAS}" "${TEMP_DIR}/app.zip"
           
           # Execute deployment
-          echo "Starting deployment process..."
-          "${TEMP_DIR}/startup.sh" \
-            "$SAS" \
-            "$ACCOUNT" \
-            "$CONTAINER" \
-            "$PREFIX" \
-            "$ARTIFACT"
+          echo "Running deployment script..."
+          "${TEMP_DIR}/startup.sh" "${TEMP_DIR}/app.zip"
           
           # Cleanup
           rm -rf "$TEMP_DIR"
