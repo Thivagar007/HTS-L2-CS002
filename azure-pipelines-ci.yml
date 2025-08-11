@@ -76,43 +76,43 @@ stages:
   - job: Upload
     steps:
       - task: AzureCLI@2
-        displayName: 'Assign Storage Blob Data Contributor to this service connection'
+        displayName: 'Ensure RBAC: Blob Data Contributor on storage'
         inputs:
-        azureSubscription: 'HTS-L2-CS002-ARM-SC'   # must have Owner/User Access Administrator
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euo pipefail
-          ACCOUNT="$(storageAccountName)"
+          azureSubscription: 'HTS-L2-CS002-ARM-SC'   # your ARM service connection
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
 
-          # Scope: storage account resource ID
-          SCOPE=$(az storage account show -n "$ACCOUNT" --query id -o tsv)
+            ACCOUNT="$(storageAccountName)"  # from your variable group
+            # Scope is the storage account resource ID
+            SCOPE=$(az storage account show -n "$ACCOUNT" --query id -o tsv)
 
-          # Get current service principal IDs (do NOT echo them)
-          APPID=$(az account show --query "user.name" -o tsv)             # client/app id
-          SP_OBJECTID=$(az ad sp show --id "$APPID" --query id -o tsv)    # object id
+            # The signed-in identity is the DevOps service connection’s SP
+            APPID=$(az account show --query "user.name" -o tsv)
+            SP_OBJECTID=$(az ad sp show --id "$APPID" --query id -o tsv)
 
-          # Check if role already assigned
-          HAS=$(az role assignment list \
-                  --assignee-object-id "$SP_OBJECTID" \
-                  --scope "$SCOPE" \
-                  --query "[?roleDefinitionName=='Storage Blob Data Contributor'] | length(@)" -o tsv)
+            echo "Ensuring 'Storage Blob Data Contributor' on scope: $SCOPE for SP objectId: $SP_OBJECTID"
 
-          if [ "${HAS:-0}" -eq 0 ]; then
-            echo "Granting Storage Blob Data Contributor on $SCOPE"
-            az role assignment create \
-              --assignee-object-id "$SP_OBJECTID" \
-              --assignee-principal-type ServicePrincipal \
-              --role "Storage Blob Data Contributor" \
-              --scope "$SCOPE" >/dev/null
-          else
-            echo "Role already present; skipping."
-          fi
+            # Check if role already exists
+            HAS=$(az role assignment list \
+                    --assignee-object-id "$SP_OBJECTID" \
+                    --scope "$SCOPE" \
+                    --query "[?roleDefinitionName=='Storage Blob Data Contributor'] | length(@)" -o tsv)
 
-          # Wait a bit for propagation
-          echo "Waiting for RBAC propagation..."
-          sleep 20
-          
+            if [ "${HAS:-0}" -eq 0 ]; then
+              az role assignment create \
+                --assignee-object-id "$SP_OBJECTID" \
+                --assignee-principal-type ServicePrincipal \
+                --role "Storage Blob Data Contributor" \
+                --scope "$SCOPE"
+            else
+              echo "Role already assigned; skipping."
+            fi
+
+            # Give RBAC a moment to propagate
+            sleep 20
+
       - task: AzureCLI@2
         displayName: 'Upload zip + manifest to Blob (SAS)'
         inputs:
