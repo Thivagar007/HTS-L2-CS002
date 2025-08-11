@@ -76,44 +76,6 @@ stages:
   - job: Upload
     steps:
       - task: AzureCLI@2
-        displayName: 'Ensure RBAC: Blob Data Contributor on storage'
-        inputs:
-          azureSubscription: 'HTS-L2-CS002-ARM-SC'   # your ARM service connection
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
-
-            ACCOUNT="$(storageAccountName)"  # from your variable group
-            # Scope is the storage account resource ID
-            SCOPE=$(az storage account show -n "$ACCOUNT" --query id -o tsv)
-
-            # The signed-in identity is the DevOps service connection’s SP
-            APPID=$(az account show --query "user.name" -o tsv)
-            SP_OBJECTID=$(az ad sp show --id "$APPID" --query id -o tsv)
-
-            echo "Ensuring 'Storage Blob Data Contributor' on scope: $SCOPE for SP objectId: $SP_OBJECTID"
-
-            # Check if role already exists
-            HAS=$(az role assignment list \
-                    --assignee-object-id "$SP_OBJECTID" \
-                    --scope "$SCOPE" \
-                    --query "[?roleDefinitionName=='Storage Blob Data Contributor'] | length(@)" -o tsv)
-
-            if [ "${HAS:-0}" -eq 0 ]; then
-              az role assignment create \
-                --assignee-object-id "$SP_OBJECTID" \
-                --assignee-principal-type ServicePrincipal \
-                --role "Storage Blob Data Contributor" \
-                --scope "$SCOPE"
-            else
-              echo "Role already assigned; skipping."
-            fi
-
-            # Give RBAC a moment to propagate
-            sleep 20
-
-      - task: AzureCLI@2
         displayName: 'Upload zip + manifest to Blob (SAS)'
         inputs:
           azureSubscription: 'HTS-L2-CS002-ARM-SC'   # your service connection
