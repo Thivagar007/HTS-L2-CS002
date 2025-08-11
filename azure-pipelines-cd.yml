@@ -5,37 +5,48 @@ resources:
   pipelines:
     - pipeline: ciPipeline
       source: Thivagar007.HTS-L2-CS002
-      trigger: true
+      trigger: true   # auto-run CD after CI
 
 variables:
-  - group: kv-secrets
-  - group: deployment-settings
+  - group: kv-secrets             # StorageAccountSasToken, PrimaryVmPassword
+  - group: deployment-settings    # storageAccountName, storageContainer, blobPrefix, artifactName, PrimaryVmIp, PrimaryVmUser
 
 pool:
-  name: my-agent-2  # Your VMSS-based agent pool
+  name: my-agent-2
 
 stages:
-  - stage: DeployToPrimary
-    displayName: "Deploy App to Primary VM"
-    jobs:
-      - job: UploadAndRun
-        displayName: "Run startup.sh on Primary VM"
-        steps:
+- stage: DeployToPrimary
+  displayName: "Deploy App to Primary VM"
+  jobs:
+  - job: UploadAndRun
+    displayName: "Run startup.sh on Primary VM"
+    steps:
+    - checkout: self   # <-- pulls startup.sh from this repo
 
-          # Install Azure CLI, SSH client, and sshpass
-          - task: Bash@3
-            displayName: "Install Azure CLI & SSH tools"
-            inputs:
-              targetType: 'inline'
-              script: |
-                sudo apt-get update
-                sudo apt-get install -y azure-cli openssh-client sshpass
+    - task: Bash@3
+      displayName: "Install SSH tools"
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y openssh-client sshpass
 
-          # Run startup.sh on Primary VM using secrets from Key Vault
-          - task: Bash@3
-            displayName: "Run startup.sh via SSH"
-            inputs:
-              targetType: 'inline'
-              script: |
-                echo "Connecting to Primary VM at $(PrimaryVmIp)"
-                sshpass -p "$(PrimaryVmPassword)" ssh -o StrictHostKeyChecking=no adminusr@$(PrimaryVmIp) 'bash -s' < startup.sh "$(StorageAccountSasToken)"
+    - task: Bash@3
+      displayName: "Run startup.sh via SSH"
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -euo pipefail
+          test -f scripts/startup.sh || { echo "scripts/startup.sh not found"; exit 1; }
+          chmod +x scripts/startup.sh
+
+          echo "Connecting to $(PrimaryVmUser)@$(PrimaryVmIp)"
+          sshpass -p "$(PrimaryVmPassword)" \
+            ssh -o StrictHostKeyChecking=no "$(PrimaryVmUser)@$(PrimaryVmIp)" \
+            "bash -s" -- \
+            "$(StorageAccountSasToken)" \
+            "$(storageAccountName)" \
+            "$(storageContainer)" \
+            "$(blobPrefix)" \
+            "$(artifactName)" < scripts/startup.sh
