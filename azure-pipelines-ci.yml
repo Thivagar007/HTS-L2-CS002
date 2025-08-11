@@ -1,16 +1,18 @@
-# azure-pipelines-ci.yml
 trigger:
   branches:
     include:
       - main
 
+# This matches your current setup
 pool:
-  name: my-agent-2   # your self-hosted agent pool
+  name: my-agent-2   # VMSS-based agent pool
 
 variables:
-  # From Library > Variable groups
-  - group: deployment-settings   # storageAccountName, storageContainer
-  # Local
+  # Variable groups you already use
+  - group: kv-secrets            # must include: StorageAccountSasToken
+  - group: deployment-settings   # must include: storageAccountName, storageContainer
+
+  # Local variables
   - name: buildDir
     value: 'build-artifacts'
   - name: artifactName
@@ -18,96 +20,64 @@ variables:
   - name: blobPrefix
     value: 'flask/$(Build.SourceBranchName)/$(Build.BuildNumber)'
 
-# OPTIONAL: if your repo is private GitHub, keep this block and ensure service connection exists
-resources:
-  repositories:
-  - repository: self
-    type: github
-    name: Thivagar007/HTS-L2-CS002
-    endpoint: github-hts-l2
-    ref: refs/heads/main
-
 stages:
-# -----------------------------
-# Build: zip app & publish
-# -----------------------------
 - stage: Build
   displayName: 'Build & Package'
   jobs:
   - job: Build
-    displayName: 'Zip app and publish'
+    displayName: 'Zip Flask app and publish'
     steps:
-    - checkout: self
-      clean: true
+      - script: |
+          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y zip
+          echo "Preparing build dir: $(buildDir)"
+          rm -rf "$(buildDir)"
+          mkdir -p "$(buildDir)"
 
-    - bash: |
-        set -e
-        sudo apt-get update -y
-        sudo apt-get install -y zip
-        rm -rf "$(buildDir)"
-        mkdir -p "$(buildDir)"
+          # Zip only the app assets we need on the VM
+          zip -r "$(buildDir)/$(artifactName)" app.py templates static
 
-        echo "Zipping app assets..."
-        zip -r "$(buildDir)/$(artifactName)" app.py templates static
+          # (Optional) generate a minimal requirements.txt if not present
+          if [ ! -f requirements.txt ]; then
+            echo "flask" > "$(buildDir)/requirements.txt"
+          else
+            cp requirements.txt "$(buildDir)/requirements.txt"
+          fi
 
-        if [ -f requirements.txt ]; then
-          cp requirements.txt "$(buildDir)/requirements.txt"
-        else
-          echo "flask" > "$(buildDir)/requirements.txt"
-        fi
+          # Manifest to help CD & audits
+          cat > "$(buildDir)/artifact-info.json" <<EOF
+          {
+            "app":"flask-tictactoe",
+            "artifact":"$(artifactName)",
+            "branch":"$(Build.SourceBranchName)",
+            "buildId":"$(Build.BuildId)",
+            "buildNumber":"$(Build.BuildNumber)",
+            "blobPrefix":"$(blobPrefix)",
+            "storageAccount":"$(storageAccountName)",
+            "container":"$(storageContainer)"
+          }
+          EOF
 
-        cat > "$(buildDir)/artifact-info.json" <<EOF
-        {
-          "app": "flask-tictactoe",
-          "artifact": "$(artifactName)",
-          "branch": "$(Build.SourceBranchName)",
-          "buildId": "$(Build.BuildId)",
-          "buildNumber": "$(Build.BuildNumber)",
-          "blobPrefix": "$(blobPrefix)",
-          "storageAccount": "$(storageAccountName)",
-          "container": "$(storageContainer)"
-        }
-        EOF
+          ls -la "$(buildDir)"
+        displayName: 'Create zip + manifest'
 
-        ls -la "$(buildDir)"
-      displayName: 'Create zip + manifest'
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish artifact to pipeline'
+        inputs:
+          PathtoPublish: '$(buildDir)'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
 
-    - task: PublishBuildArtifacts@1
-      displayName: 'Publish artifact to pipeline'
-      inputs:
-        PathtoPublish: '$(buildDir)'
-        ArtifactName: 'drop'
-        publishLocation: 'Container'
-
-# -----------------------------
-# GrantRBAC: ensure SP has Storage Blob Data Contributor
-# -----------------------------
-- stage: GrantRBAC
-  displayName: 'Grant Storage RBAC (idempotent)'
+- stage: UploadToBlob
+  displayName: 'Upload to Azure Blob'
   dependsOn: Build
-  condition: succeeded()
   jobs:
-  - job: Grant
-    displayName: 'Grant RBAC to service principal'
+  - job: Upload
     steps:
-    # Install Azure CLI if missing
-    - bash: |
-        set -euo pipefail
-        if ! command -v az >/dev/null 2>&1; then
-          sudo apt-get update -y
-          sudo apt-get install -y ca-certificates curl apt-transport-https lsb-release gnupg
-          curl -sL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/microsoft.gpg >/dev/null
-          AZ_DIST=$(lsb_release -cs)
-          echo "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ ${AZ_DIST} main" | sudo tee /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update -y
-          sudo apt-get install -y azure-cli
-        fi
-        az version
-      displayName: 'Install Azure CLI (if missing)'
-
-    - task: AzureCLI@2
-      displayName: 'Assign Storage Blob Data Contributor to this service connection'
-      inputs:
+      - task: AzureCLI@2
+        displayName: 'Assign Storage Blob Data Contributor to this service connection'
+        inputs:
         azureSubscription: 'HTS-L2-CS002-ARM-SC'   # must have Owner/User Access Administrator
         scriptType: bash
         scriptLocation: inlineScript
@@ -142,51 +112,47 @@ stages:
           # Wait a bit for propagation
           echo "Waiting for RBAC propagation..."
           sleep 20
+          
+      - task: AzureCLI@2
+        displayName: 'Upload zip + manifest to Blob (SAS)'
+        inputs:
+          azureSubscription: 'HTS-L2-CS002-ARM-SC'   # your service connection
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
 
-# -----------------------------
-# UploadToBlob: upload using RBAC
-# -----------------------------
-- stage: UploadToBlob
-  displayName: 'Upload to Azure Blob (RBAC)'
-  dependsOn: GrantRBAC
-  condition: succeeded()
-  jobs:
-  - job: Upload
-    displayName: 'Upload artifact with RBAC'
-    steps:
-    - task: AzureCLI@2
-      displayName: 'Upload zip + manifest'
-      inputs:
-        azureSubscription: 'HTS-L2-CS002-ARM-SC'
-        scriptType: bash
-        scriptLocation: inlineScript
-        inlineScript: |
-          set -euo pipefail
-          ACCOUNT="$(storageAccountName)"
-          CONTAINER="$(storageContainer)"
-          PREFIX="$(blobPrefix)"
-          SRC_DIR="$(Build.ArtifactStagingDirectory)"
+            echo "Ensuring container exists..."
+            az storage container create \
+              --account-name "$(storageAccountName)" \
+              --name "$(storageContainer)" \
+              --sas-token "$(StorageAccountSasToken)" >/dev/null
 
-          echo "Ensuring container exists..."
-          az storage container create \
-            --account-name "$ACCOUNT" \
-            --name "$CONTAINER" \
-            --auth-mode login >/dev/null || true
+            echo "Uploading to $(blobPrefix)/ ..."
+            az storage blob upload \
+              --account-name "$(storageAccountName)" \
+              --container-name "$(storageContainer)" \
+              --name "$(blobPrefix)/$(artifactName)" \
+              --file "$(buildDir)/$(artifactName)" \
+              --sas-token "$(StorageAccountSasToken)" \
+              --overwrite
 
-          echo "Uploading files..."
-          # retry a couple times in case RBAC propagation is still settling
-          for i in 1 2 3; do
-            if az storage blob upload-batch \
-                --account-name "$ACCOUNT" \
-                --destination "$CONTAINER" \
-                --destination-path "$PREFIX" \
-                --source "$SRC_DIR" \
-                --auth-mode login \
-                --overwrite; then
-              break
-            fi
-            echo "Upload attempt $i failed; retrying in 15s..."
-            sleep 15
-          done
+            az storage blob upload \
+              --account-name "$(storageAccountName)" \
+              --container-name "$(storageContainer)" \
+              --name "$(blobPrefix)/artifact-info.json" \
+              --file "$(buildDir)/artifact-info.json" \
+              --sas-token "$(StorageAccountSasToken)" \
+              --overwrite
 
-          echo "Done: https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}/${PREFIX}/"
+            # Upload requirements.txt too
+            az storage blob upload \
+              --account-name "$(storageAccountName)" \
+              --container-name "$(storageContainer)" \
+              --name "$(blobPrefix)/requirements.txt" \
+              --file "$(buildDir)/requirements.txt" \
+              --sas-token "$(StorageAccountSasToken)" \
+              --overwrite
+
+            echo "Done:"
+            echo "https://$(storageAccountName).blob.core.windows.net/$(storageContainer)/$(blobPrefix)/"
