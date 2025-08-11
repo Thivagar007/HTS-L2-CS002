@@ -5,94 +5,226 @@ resources:
   pipelines:
     - pipeline: ciPipeline
       source: Thivagar007.HTS-L2-CS002
-      trigger: true   # auto-run CD after CI
+      trigger: true
 
 variables:
-  - group: kv-secrets             # expects: StorageAccountSasToken, PrimaryVmPassword
-  - group: deployment-settings    # expects: storageAccountName, storageContainer, blobPrefix, artifactName, PrimaryVmIp, PrimaryVmUser
+  - group: kv-secrets
+  - group: deployment-settings
   - name: startupScriptName
-    value: 'startup.sh'           # must exist at <container>/<blobPrefix>/startup.sh
+    value: 'startup.sh'
+  - name: blobPrefix
+    value: 'deployment'  # Added since not in your variable groups
+  - name: artifactName
+    value: 'app-bundle.zip'  # Added since not in your variable groups
+  - name: retryCount
+    value: 3
+  - name: retryDelaySeconds
+    value: 5
 
 pool:
   name: my-agent-2
 
 stages:
-- stage: DeployToPrimary
-  displayName: "Deploy App to Primary VM"
+- stage: ValidateVariables
+  displayName: "Validate Configuration"
   jobs:
-  - job: UploadAndRun
-    displayName: "Download startup.sh from Blob and execute on Primary VM"
+  - job: Validate
+    displayName: "Check Required Variables"
     steps:
-
     - task: Bash@3
-      displayName: "Install SSH tools (openssh, sshpass) and curl"
+      displayName: "Verify Variable Group Contents"
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -euxo pipefail
+          
+          # Verify required variables are set
+          required_vars=(
+            "StorageAccountSasToken"
+            "PrimaryVmPassword"
+            "PrimaryVmlp"
+            "storageAccountName"
+            "storageContainer"
+            "resourceGroup"
+          )
+          
+          missing_vars=()
+          for var in "${required_vars[@]}"; do
+            if [ -z "${!var}" ]; then
+              missing_vars+=("$var")
+            fi
+          done
+          
+          if [ ${#missing_vars[@]} -gt 0 ]; then
+            echo "##[error]Missing required variables:"
+            printf "##[error]- %s\n" "${missing_vars[@]}"
+            exit 1
+          fi
+          
+          echo "##[section]All required variables are present"
+
+- stage: DeployToPrimary
+  displayName: "Deploy to Primary VM"
+  dependsOn: ValidateVariables
+  jobs:
+  - job: Deployment
+    displayName: "Execute Deployment"
+    steps:
+    - task: Bash@3
+      displayName: "Install Dependencies"
       inputs:
         targetType: 'inline'
         script: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y openssh-client sshpass curl
+          sudo apt-get install -y openssh-client sshpass curl jq
 
     - task: Bash@3
-      displayName: "Verify storage container, startup.sh, and artifact exist"
+      displayName: "Validate Storage Access"
       inputs:
         targetType: 'inline'
         script: |
-          set -euo pipefail
-          SAS="$(StorageAccountSasToken)"; SAS="${SAS#\?}"
-          BASE="https://$(storageAccountName).blob.core.windows.net/$(storageContainer)"
-
-          echo "Checking container: ${BASE}"
-          CONT_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE}?restype=container&${SAS}")
-          if [ "$CONT_CODE" != "200" ]; then
-            echo "ERROR: Container check failed (HTTP $CONT_CODE) at ${BASE}"
-            exit 1
-          fi
-          echo "OK: Container exists."
-
-          SCRIPT_URL="${BASE}/$(blobPrefix)/$(startupScriptName)?${SAS}"
-          echo "Checking startup script: ${BASE}/$(blobPrefix)/$(startupScriptName)"
-          SCRIPT_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$SCRIPT_URL")
-          if [ "$SCRIPT_CODE" != "200" ]; then
-            echo "ERROR: startup.sh not found (HTTP $SCRIPT_CODE)"; exit 1
-          fi
-          echo "OK: startup.sh present."
-
-          ART_URL="${BASE}/$(blobPrefix)/$(artifactName)?${SAS}"
-          echo "Checking artifact: ${BASE}/$(blobPrefix)/$(artifactName)"
-          ART_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$ART_URL")
-          if [ "$ART_CODE" != "200" ]; then
-            echo "ERROR: artifact not found (HTTP $ART_CODE)"; exit 1
-          fi
-          echo "OK: artifact present."
+          set -euxo pipefail
+          SAS="$(StorageAccountSasToken)"
+          
+          # Normalize SAS token
+          [[ "$SAS" != \?* ]] && SAS="?${SAS}"
+          echo "##[debug]SAS token normalized"
+          
+          BASE_URL="https://$(storageAccountName).blob.core.windows.net"
+          CONTAINER_URL="${BASE_URL}/$(storageContainer)"
+          
+          # Function to validate storage access
+          validate_storage_access() {
+            local url=$1
+            local resource=$2
+            local attempt=1
+            
+            while [ $attempt -le $(retryCount) ]; do
+              status_code=$(curl -s -o /dev/null -w "%{http_code}" "${url}${SAS}")
+              
+              case $status_code in
+                200) echo "OK: $resource accessible"; return 0 ;;
+                404) echo "##[error]$resource not found"; return 1 ;;
+                403) echo "##[error]Access denied to $resource"; return 1 ;;
+                *)   echo "##[warning]$resource check failed (HTTP $status_code)" ;;
+              esac
+              
+              sleep $(retryDelaySeconds)
+              ((attempt++))
+            done
+            
+            echo "##[error]All attempts failed for $resource"
+            return 1
+          }
+          
+          # Validate container access
+          validate_storage_access "${CONTAINER_URL}?restype=container" "Storage Container" || exit 1
+          
+          # Validate startup script exists
+          validate_storage_access "${CONTAINER_URL}/$(blobPrefix)/$(startupScriptName)" "Startup Script" || exit 1
+          
+          # Validate artifact exists
+          validate_storage_access "${CONTAINER_URL}/$(blobPrefix)/$(artifactName)" "Deployment Artifact" || exit 1
 
     - task: Bash@3
-      displayName: "Download startup.sh from Blob on VM and execute"
+      displayName: "Execute Remote Deployment"
       inputs:
         targetType: 'inline'
         script: |
-          set -euo pipefail
-          SAS="$(StorageAccountSasToken)"; SAS="${SAS#\?}"
-
-          echo "Connecting to $(PrimaryVmUser)@$(PrimaryVmIp)"
-          sshpass -p "$(PrimaryVmPassword)" ssh -o StrictHostKeyChecking=no "$(PrimaryVmUser)@$(PrimaryVmIp)" \
-            bash -s -- "?${SAS}" "$(storageAccountName)" "$(storageContainer)" "$(blobPrefix)" "$(startupScriptName)" "$(artifactName)" <<'REMOTE'
-          set -euo pipefail
-          SAS_RAW="${1:-}"; ACCT="${2:-}"; CONT="${3:-}"; PREFIX="${4:-}"; SCRIPT="${5:-}"; ARTIFACT="${6:-}"
-          SAS="${SAS_RAW#\?}"
-
-          # Ensure basic tools on VM
-          if ! command -v curl >/dev/null 2>&1; then
-            if command -v apt-get >/devnull 2>&1; then
-              sudo apt-get update -y && sudo apt-get install -y curl
-            fi
+          set -euxo pipefail
+          SAS="$(StorageAccountSasToken)"
+          [[ "$SAS" != \?* ]] && SAS="?${SAS}"
+          
+          # Generate temporary SSH key pair
+          KEY_FILE="$(Build.StagingDirectory)/deploy_key"
+          ssh-keygen -t rsa -b 4096 -f "$KEY_FILE" -N "" -q
+          
+          # Configure SSH for the session
+          SSH_OPTS=(
+            "-o StrictHostKeyChecking=no"
+            "-o UserKnownHostsFile=/dev/null"
+            "-o LogLevel=ERROR"
+            "-i $KEY_FILE"
+          )
+          
+          # Copy public key to VM
+          echo "Configuring SSH access..."
+          sshpass -p "$(PrimaryVmPassword)" ssh-copy-id \
+            "${SSH_OPTS[@]}" \
+            "$(PrimaryVmUser)@$(PrimaryVmlp)"
+          
+          # Execute remote deployment script
+          echo "Starting remote deployment..."
+          ssh "${SSH_OPTS[@]}" \
+            "$(PrimaryVmUser)@$(PrimaryVmlp)" \
+            bash -s -- "$SAS" "$(storageAccountName)" "$(storageContainer)" "$(blobPrefix)" "$(startupScriptName)" "$(artifactName)" <<'REMOTE_SCRIPT'
+          set -euxo pipefail
+          
+          # Parameters from Azure Pipelines
+          SAS="${1}"
+          ACCOUNT="${2}"
+          CONTAINER="${3}"
+          PREFIX="${4}"
+          SCRIPT="${5}"
+          ARTIFACT="${6}"
+          
+          # System configuration
+          TEMP_DIR="/tmp/deployment-$(date +%s)"
+          mkdir -p "$TEMP_DIR"
+          
+          # Install required packages
+          if ! command -v curl >/dev/null || ! command -v unzip >/dev/null; then
+            echo "Installing dependencies..."
+            sudo apt-get update && sudo apt-get install -y curl unzip
           fi
-
-          BASE="https://${ACCT}.blob.core.windows.net/${CONT}/${PREFIX}"
-          echo "Downloading startup script from: ${BASE}/${SCRIPT}"
-          curl -sSL -o /tmp/startup.sh "${BASE}/${SCRIPT}?${SAS}"
-          chmod +x /tmp/startup.sh
-
-          echo "Executing startup.sh..."
-          /tmp/startup.sh "?${SAS}" "${ACCT}" "${CONT}" "${PREFIX}" "${ARTIFACT}"
-          REMOTE
+          
+          # Download function with retries
+          download_with_retry() {
+            local url="$1"
+            local output="$2"
+            local max_attempts=3
+            local delay=5
+            
+            for ((attempt=1; attempt<=max_attempts; attempt++)); do
+              if curl -sSL -o "$output" "${url}${SAS}"; then
+                echo "Download successful"
+                return 0
+              fi
+              echo "Attempt $attempt failed, retrying in $delay seconds..."
+              sleep $delay
+            done
+            echo "##[error]Failed to download after $max_attempts attempts"
+            return 1
+          }
+          
+          # Download and execute startup script
+          echo "Downloading startup script..."
+          download_with_retry \
+            "https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}/${PREFIX}/${SCRIPT}" \
+            "${TEMP_DIR}/startup.sh" || exit 1
+          
+          chmod +x "${TEMP_DIR}/startup.sh"
+          
+          # Download artifact
+          echo "Downloading application artifact..."
+          download_with_retry \
+            "https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}/${PREFIX}/${ARTIFACT}" \
+            "${TEMP_DIR}/artifact.zip" || exit 1
+          
+          # Execute deployment
+          echo "Starting deployment process..."
+          "${TEMP_DIR}/startup.sh" \
+            "$SAS" \
+            "$ACCOUNT" \
+            "$CONTAINER" \
+            "$PREFIX" \
+            "$ARTIFACT"
+          
+          # Cleanup
+          rm -rf "$TEMP_DIR"
+          echo "##[section]Deployment completed successfully"
+          REMOTE_SCRIPT
+          
+          # Cleanup temporary key
+          rm -f "${KEY_FILE}" "${KEY_FILE}.pub"
