@@ -27,9 +27,6 @@ stages:
   - job: Build
     displayName: 'Zip Flask app and publish'
     steps:
-      - checkout: self
-        clear: true
-        persistCredentials: true  # Needed for Azure CLI tasks
       - script: |
           set -e
           sudo apt-get update -y
