@@ -76,45 +76,69 @@ stages:
   - job: Upload
     steps:
       - task: AzureCLI@2
-        displayName: 'Upload zip + manifest to Blob (SAS)'
+        displayName: 'Upload zip + manifest to Blob (SAS) with temporary firewall allow'
         inputs:
-          azureSubscription: 'HTS-L2-CS002-ARM-SC'   # your service connection
+          azureSubscription: 'HTS-L2-CS002-ARM-SC'
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
 
+            ACCOUNT="$(storageAccountName)"
+            CONTAINER="$(storageContainer)"
+            PREFIX="$(blobPrefix)"
+            SRC_DIR="$(buildDir)"
+            SAS="$(StorageAccountSasToken)"
+
+            echo "Resolving resource group for $ACCOUNT..."
+            RG=$(az storage account show -n "$ACCOUNT" --query resourceGroup -o tsv)
+
+            # Find agent public IP (try a few services)
+            AGENT_IP=$(curl -s https://ifconfig.me || curl -s https://api.ipify.org || curl -s http://whatismyip.akamai.com)
+            if [ -z "$AGENT_IP" ]; then
+              echo "##vso[task.logissue type=error]Could not determine agent public IP"; exit 1
+            fi
+            echo "Agent public IP: $AGENT_IP"
+
+            echo "Temporarily allowing IP on storage firewall..."
+            az storage account network-rule add -g "$RG" -n "$ACCOUNT" --ip-address "$AGENT_IP" >/dev/null || true
+
+            cleanup() {
+              echo "Removing temporary firewall IP allow..."
+              az storage account network-rule remove -g "$RG" -n "$ACCOUNT" --ip-address "$AGENT_IP" >/dev/null || true
+            }
+            trap cleanup EXIT
+
             echo "Ensuring container exists..."
             az storage container create \
-              --account-name "$(storageAccountName)" \
-              --name "$(storageContainer)" \
-              --sas-token "$(StorageAccountSasToken)" >/dev/null
+              --account-name "$ACCOUNT" \
+              --name "$CONTAINER" \
+              --sas-token "$SAS" >/dev/null
 
-            echo "Uploading to $(blobPrefix)/ ..."
+            echo "Uploading to ${PREFIX}/ ..."
             az storage blob upload \
-              --account-name "$(storageAccountName)" \
-              --container-name "$(storageContainer)" \
-              --name "$(blobPrefix)/$(artifactName)" \
-              --file "$(buildDir)/$(artifactName)" \
-              --sas-token "$(StorageAccountSasToken)" \
+              --account-name "$ACCOUNT" \
+              --container-name "$CONTAINER" \
+              --name "${PREFIX}/$(artifactName)" \
+              --file "${SRC_DIR}/$(artifactName)" \
+              --sas-token "$SAS" \
               --overwrite
 
             az storage blob upload \
-              --account-name "$(storageAccountName)" \
-              --container-name "$(storageContainer)" \
-              --name "$(blobPrefix)/artifact-info.json" \
-              --file "$(buildDir)/artifact-info.json" \
-              --sas-token "$(StorageAccountSasToken)" \
+              --account-name "$ACCOUNT" \
+              --container-name "$CONTAINER" \
+              --name "${PREFIX}/artifact-info.json" \
+              --file "${SRC_DIR}/artifact-info.json" \
+              --sas-token "$SAS" \
               --overwrite
 
-            # Upload requirements.txt too
             az storage blob upload \
-              --account-name "$(storageAccountName)" \
-              --container-name "$(storageContainer)" \
-              --name "$(blobPrefix)/requirements.txt" \
-              --file "$(buildDir)/requirements.txt" \
-              --sas-token "$(StorageAccountSasToken)" \
+              --account-name "$ACCOUNT" \
+              --container-name "$CONTAINER" \
+              --name "${PREFIX}/requirements.txt" \
+              --file "${SRC_DIR}/requirements.txt" \
+              --sas-token "$SAS" \
               --overwrite
 
             echo "Done:"
-            echo "https://$(storageAccountName).blob.core.windows.net/$(storageContainer)/$(blobPrefix)/"
+            echo "https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}/${PREFIX}/"
