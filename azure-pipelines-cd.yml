@@ -1,94 +1,41 @@
 trigger: none
 pr: none
 
-# Auto-run this when CI finishes (optional)
 resources:
   pipelines:
     - pipeline: ciPipeline
-      source: Thivagar007.HTS-L2-CS002  # <-- set to your CI pipeline name
+      source: Thivagar007.HTS-L2-CS002
       trigger: true
 
 variables:
-  - group: kv-secrets             # StorageAccountSasToken, PrimaryVmPassword, etc.
-  - group: deployment-settings    # storageAccountName, storageContainer, PrimaryVmIp, PrimaryVmUser
-
-  # Which build to deploy: by default, latest BuildNumber under the branch
-  - name: branch
-    value: 'main'
+  - group: kv-secrets
+  - group: deployment-settings
 
 pool:
-  name: my-agent-2
+  name: my-agent-2  # Your VMSS-based agent pool
 
 stages:
-- stage: Prep
-  displayName: 'Prepare startup script'
-  jobs:
-  - job: putScript
-    steps:
-      - checkout: self
-      - task: Bash@3
-        displayName: 'Show startup.sh'
-        inputs:
-          targetType: inline
-          script: |
-            echo "We will SCP startup.sh to the VM and run it with args:"
-            echo "./startup.sh <account> <container> <prefix> <sas>"
+  - stage: DeployToPrimary
+    displayName: "Deploy App to Primary VM"
+    jobs:
+      - job: UploadAndRun
+        displayName: "Run startup.sh on Primary VM"
+        steps:
 
-- stage: Deploy
-  displayName: 'Deploy to Primary VM'
-  dependsOn: Prep
-  jobs:
-  - job: deploy
-    steps:
-      - task: Bash@3
-        displayName: 'Detect latest BuildNumber in Blob (if needed)'
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            # If you want to pin a particular build, set BUILD_NUMBER variable at queue time.
-            if [ -z "${BUILD_NUMBER:-}" ]; then
-              echo "Detecting latest BuildNumber under branch $(branch)..."
-              # List blobs & parse build numbers from prefix folders:
-              # NOTE: this assumes consistent prefix 'flask/<branch>/<BuildNumber>/...'
-              # We’ll just use the current run’s build number via resources metadata when triggered.
-              # Fallback to pipeline Build.BuildNumber if provided.
-              BUILD_NUMBER="$(Build.BuildNumber)"
-            fi
-            echo "##vso[task.setvariable variable=RESOLVED_BUILD_NUMBER]$BUILD_NUMBER"
-            echo "Resolved BuildNumber: $BUILD_NUMBER"
+          # Install Azure CLI, SSH client, and sshpass
+          - task: Bash@3
+            displayName: "Install Azure CLI & SSH tools"
+            inputs:
+              targetType: 'inline'
+              script: |
+                sudo apt-get update
+                sudo apt-get install -y azure-cli openssh-client sshpass
 
-      - task: CopyFilesOverSSH@0
-        displayName: 'Copy startup.sh to VM'
-        inputs:
-          sshEndpoint: 'ssh-primary-vm'   # If you use an SSH service connection, use this and REMOVE sshpass step below
-          sourceFolder: '.'
-          contents: 'startup.sh'
-          targetFolder: '/tmp'
-
-      # If you do NOT use an SSH service connection, comment the step above and use sshpass instead:
-      # - task: Bash@3
-      #   displayName: 'SCP startup.sh to VM (sshpass)'
-      #   inputs:
-      #     targetType: inline
-      #     script: |
-      #       set -euo pipefail
-      #       sudo apt-get update -y && sudo apt-get install -y sshpass
-      #       sshpass -p "$(PrimaryVmPassword)" scp -o StrictHostKeyChecking=no startup.sh $(PrimaryVmUser)@$(PrimaryVmIp):/tmp/startup.sh
-
-      - task: Bash@3
-        displayName: 'Run startup.sh on VM'
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            sudo apt-get update -y && sudo apt-get install -y sshpass
-
-            ACCOUNT="$(storageAccountName)"
-            CONTAINER="$(storageContainer)"
-            PREFIX="flask/$(branch)/$(RESOLVED_BUILD_NUMBER)"
-            SAS="$(StorageAccountSasToken)"
-
-            echo "Connecting to $(PrimaryVmIp) as $(PrimaryVmUser)"
-            # Pipe the script over SSH and run with args
-            sshpass -p "$(PrimaryVmPassword)" ssh -o StrictHostKeyChecking=no $(PrimaryVmUser)@$(PrimaryVmIp) "bash /tmp/startup.sh $ACCOUNT $CONTAINER $PREFIX '$SAS'"
+          # Run startup.sh on Primary VM using secrets from Key Vault
+          - task: Bash@3
+            displayName: "Run startup.sh via SSH"
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "Connecting to Primary VM at $(PrimaryVmIp)"
+                sshpass -p "$(PrimaryVmPassword)" ssh -o StrictHostKeyChecking=no adminusr@$(PrimaryVmIp) 'bash -s' < startup.sh "$(StorageAccountSasToken)"
