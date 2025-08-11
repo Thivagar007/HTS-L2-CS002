@@ -4,15 +4,17 @@ trigger:
       - main
 
 pool:
-  name: my-agent-2   # use the pool you actually have
+  name: my-agent-2
 
 variables:
-  - group: kv-secrets
-  - group: deployment-settings
+  - group: kv-secrets                 # expects: StorageAccountSasToken
+  - group: deployment-settings        # expects: storageAccountName, storageContainer
   - name: buildDir
     value: 'build-artifacts'
-  - name: jdkPath
-    value: '/usr/lib/jvm/java-17-openjdk-amd64'  # Ubuntu path for OpenJDK 17
+  - name: artifactName
+    value: 'app.zip'
+  - name: blobPrefix
+    value: 'java/$(Build.SourceBranchName)/$(Build.BuildNumber)'
 
 stages:
 - stage: Build
@@ -24,46 +26,75 @@ stages:
       name: my-agent-2
       demands:
         - agent.os -equals Linux
-
     steps:
+    - checkout: self
+
     - script: |
-        set -e
-        echo "Installing JDK 17..."
+        set -euo pipefail
+        echo "Installing JDK 17 and curl..."
         sudo apt-get update -y
-        sudo apt-get install -y openjdk-17-jdk
+        sudo apt-get install -y openjdk-17-jdk curl
         java -version
-      displayName: 'Install JDK'
+
+        # Derive JAVA_HOME dynamically
+        JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(which javac)")")")"
+        echo "Detected JAVA_HOME: $JAVA_HOME"
+        echo "##vso[task.setvariable variable=JAVA_HOME]$JAVA_HOME"
+      displayName: 'Install JDK & set JAVA_HOME'
+
+    - script: |
+        set -euo pipefail
+        echo "Looking for pom.xml..."
+        # Prefer repo root pom; otherwise find first match up to depth 5
+        if [ -f pom.xml ]; then
+          POM_PATH="pom.xml"
+        else
+          POM_PATH="$(find . -maxdepth 5 -type f -name pom.xml | head -1 || true)"
+        fi
+        if [ -z "${POM_PATH:-}" ]; then
+          echo "No pom.xml found in repository."
+          exit 1
+        fi
+        echo "Using POM: $POM_PATH"
+        echo "##vso[task.setvariable variable=POM_PATH]$POM_PATH"
+      displayName: 'Detect pom.xml'
 
     - task: Maven@3
       displayName: 'Build with Maven'
       inputs:
-        mavenPomFile: 'pom.xml'
+        mavenPomFile: '$(POM_PATH)'
         goals: 'clean package'
         options: '-DskipTests=false'
         publishJUnitResults: true
         testResultsFiles: '**/surefire-reports/TEST-*.xml'
         jdkVersionOption: 'path'
-        jdkDirectory: '$(jdkPath)'
+        jdkDirectory: '$(JAVA_HOME)'
 
     - script: |
-        set -e
-        echo "Build output (target/):"
-        ls -la target || true
-        JAR_FILE=$(find target -type f -name "*.jar" | head -1)
-        if [ -z "$JAR_FILE" ]; then
-          echo "No JAR found under target/"
+        set -euo pipefail
+        echo "Build output (target/ directories):"
+        find . -type d -name target -maxdepth 5 -print
+        # pick the first jar under any target folder
+        JAR_FILE="$(find . -type f -path "*/target/*.jar" | head -1 || true)"
+        if [ -z "${JAR_FILE:-}" ]; then
+          echo "No JAR found under any target/ folder."
           exit 1
         fi
-        echo "##vso[task.setvariable variable=JAR_PATH]$JAR_FILE"
         echo "Using JAR file: $JAR_FILE"
+        echo "##vso[task.setvariable variable=JAR_PATH]$JAR_FILE"
       displayName: 'Capture JAR path'
-    
+
     - task: PublishBuildArtifacts@1
       displayName: 'Publish JAR artifact'
       inputs:
         PathtoPublish: '$(JAR_PATH)'
         ArtifactName: 'drop'
         publishLocation: 'Container'
+
+    - script: |
+        set -euo pipefail
+        mkdir -p "$(Build.SourcesDirectory)/$(buildDir)"
+      displayName: 'Ensure build dir exists'
 
     - task: ArchiveFiles@2
       displayName: 'Zip app JAR'
@@ -75,8 +106,7 @@ stages:
         replaceExistingArchive: true
 
     - script: |
-        set -e
-
+        set -euo pipefail
         echo "Preparing AzCopy..."
         mkdir -p /tmp/azcopy
         cd /tmp/azcopy
@@ -94,6 +124,5 @@ stages:
 
         echo "Uploading to: ${DEST_BASE} (SAS hidden)"
         ./azcopy copy "$SRC_FILE" "$DEST_URL" --overwrite=true
-
         echo "Upload complete."
       displayName: 'Upload zip to Azure Blob (AzCopy)'
