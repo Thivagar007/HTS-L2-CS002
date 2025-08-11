@@ -21,7 +21,7 @@ stages:
   - job: Build
     displayName: 'Build Java App'
     pool:
-      name: 'vmss-agent'
+      name: my-agent-2
       demands:
         - agent.os -equals Linux
 
