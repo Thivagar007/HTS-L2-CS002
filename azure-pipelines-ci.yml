@@ -1,18 +1,23 @@
+# azure-pipelines-ci.yml
 trigger:
   branches:
     include:
       - main
 
 pool:
-  name: my-agent-2         # your VMSS-based agent pool
+  name: my-agent-2   # your self-hosted VMSS agent
 
 variables:
-  - group: deployment-settings  # provides: storageAccountName, storageContainer, azureServiceConnection
+  # Library group should contain:
+  #   storageAccountName (e.g., htsl2cs002sa)
+  #   storageContainer   (e.g., artifacts)
+  - group: deployment-settings
+
   - name: buildDir
     value: 'build-artifacts'
   - name: artifactName
     value: 'flask-app.zip'
-  # Versioned path helps DR traceability: branch/buildNumber
+  # Versioned prefix helps DR traceability (branch/buildNumber)
   - name: blobPrefix
     value: 'flask/$(Build.SourceBranchName)/$(Build.BuildNumber)'
 
@@ -32,17 +37,17 @@ stages:
           mkdir -p "$(buildDir)"
 
           echo "Zipping app assets..."
-          # Adjust paths if your entry points differ
+          # Adjust paths if your app layout differs
           zip -r "$(buildDir)/$(artifactName)" app.py templates static
 
-          # Include requirements.txt (generate minimal if missing)
+          # Include requirements.txt (or generate minimal if missing)
           if [ -f requirements.txt ]; then
             cp requirements.txt "$(buildDir)/requirements.txt"
           else
             echo "flask" > "$(buildDir)/requirements.txt"
           fi
 
-          # Write a manifest (useful for CD and DR audit)
+          # Manifest (handy for CD & DR audits)
           cat > "$(buildDir)/artifact-info.json" <<EOF
           {
             "app": "flask-tictactoe",
@@ -74,7 +79,7 @@ stages:
   - job: Upload
     displayName: 'Ensure AZ CLI + Upload with RBAC'
     steps:
-      # Ensure Azure CLI is present on the self-hosted agent
+      # Install Azure CLI on the self-hosted agent if missing
       - bash: |
           set -euo pipefail
           if ! command -v az >/dev/null 2>&1; then
@@ -93,7 +98,7 @@ stages:
       - task: AzureCLI@2
         displayName: 'Upload zip + manifest to Blob using RBAC'
         inputs:
-          azureSubscription: '$(azureServiceConnection)'   # Service Connection with RBAC access
+          azureSubscription: 'HTS-L2-CS002-ARM-SC'   # <-- your service connection (exact name)
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
