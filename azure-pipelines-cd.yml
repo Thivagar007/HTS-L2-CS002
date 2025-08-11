@@ -8,8 +8,10 @@ resources:
       trigger: true   # auto-run CD after CI
 
 variables:
-  - group: kv-secrets             # StorageAccountSasToken, PrimaryVmPassword
-  - group: deployment-settings    # storageAccountName, storageContainer, blobPrefix, artifactName, PrimaryVmIp, PrimaryVmUser
+  - group: kv-secrets             # expects: StorageAccountSasToken, PrimaryVmPassword
+  - group: deployment-settings    # expects: storageAccountName, storageContainer, blobPrefix, artifactName, PrimaryVmIp, PrimaryVmUser
+  - name: startupScriptName
+    value: 'startup.sh'           # must exist at <container>/<blobPrefix>/startup.sh
 
 pool:
   name: my-agent-2
@@ -19,34 +21,78 @@ stages:
   displayName: "Deploy App to Primary VM"
   jobs:
   - job: UploadAndRun
-    displayName: "Run startup.sh on Primary VM"
+    displayName: "Download startup.sh from Blob and execute on Primary VM"
     steps:
-    - checkout: self   # <-- pulls startup.sh from this repo
 
     - task: Bash@3
-      displayName: "Install SSH tools"
+      displayName: "Install SSH tools (openssh, sshpass) and curl"
       inputs:
         targetType: 'inline'
         script: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y openssh-client sshpass
+          sudo apt-get update -y
+          sudo apt-get install -y openssh-client sshpass curl
 
     - task: Bash@3
-      displayName: "Run startup.sh via SSH"
+      displayName: "Verify storage container, startup.sh, and artifact exist"
       inputs:
         targetType: 'inline'
         script: |
           set -euo pipefail
-          test -f scripts/startup.sh || { echo "scripts/startup.sh not found"; exit 1; }
-          chmod +x scripts/startup.sh
+          SAS="$(StorageAccountSasToken)"; SAS="${SAS#\?}"
+          BASE="https://$(storageAccountName).blob.core.windows.net/$(storageContainer)"
+
+          echo "Checking container: ${BASE}"
+          CONT_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE}?restype=container&${SAS}")
+          if [ "$CONT_CODE" != "200" ]; then
+            echo "ERROR: Container check failed (HTTP $CONT_CODE) at ${BASE}"
+            exit 1
+          fi
+          echo "OK: Container exists."
+
+          SCRIPT_URL="${BASE}/$(blobPrefix)/$(startupScriptName)?${SAS}"
+          echo "Checking startup script: ${BASE}/$(blobPrefix)/$(startupScriptName)"
+          SCRIPT_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$SCRIPT_URL")
+          if [ "$SCRIPT_CODE" != "200" ]; then
+            echo "ERROR: startup.sh not found (HTTP $SCRIPT_CODE)"; exit 1
+          fi
+          echo "OK: startup.sh present."
+
+          ART_URL="${BASE}/$(blobPrefix)/$(artifactName)?${SAS}"
+          echo "Checking artifact: ${BASE}/$(blobPrefix)/$(artifactName)"
+          ART_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$ART_URL")
+          if [ "$ART_CODE" != "200" ]; then
+            echo "ERROR: artifact not found (HTTP $ART_CODE)"; exit 1
+          fi
+          echo "OK: artifact present."
+
+    - task: Bash@3
+      displayName: "Download startup.sh from Blob on VM and execute"
+      inputs:
+        targetType: 'inline'
+        script: |
+          set -euo pipefail
+          SAS="$(StorageAccountSasToken)"; SAS="${SAS#\?}"
 
           echo "Connecting to $(PrimaryVmUser)@$(PrimaryVmIp)"
-          sshpass -p "$(PrimaryVmPassword)" \
-            ssh -o StrictHostKeyChecking=no "$(PrimaryVmUser)@$(PrimaryVmIp)" \
-            "bash -s" -- \
-            "$(StorageAccountSasToken)" \
-            "$(storageAccountName)" \
-            "$(storageContainer)" \
-            "$(blobPrefix)" \
-            "$(artifactName)" < scripts/startup.sh
+          sshpass -p "$(PrimaryVmPassword)" ssh -o StrictHostKeyChecking=no "$(PrimaryVmUser)@$(PrimaryVmIp)" \
+            bash -s -- "?${SAS}" "$(storageAccountName)" "$(storageContainer)" "$(blobPrefix)" "$(startupScriptName)" "$(artifactName)" <<'REMOTE'
+          set -euo pipefail
+          SAS_RAW="${1:-}"; ACCT="${2:-}"; CONT="${3:-}"; PREFIX="${4:-}"; SCRIPT="${5:-}"; ARTIFACT="${6:-}"
+          SAS="${SAS_RAW#\?}"
+
+          # Ensure basic tools on VM
+          if ! command -v curl >/dev/null 2>&1; then
+            if command -v apt-get >/devnull 2>&1; then
+              sudo apt-get update -y && sudo apt-get install -y curl
+            fi
+          fi
+
+          BASE="https://${ACCT}.blob.core.windows.net/${CONT}/${PREFIX}"
+          echo "Downloading startup script from: ${BASE}/${SCRIPT}"
+          curl -sSL -o /tmp/startup.sh "${BASE}/${SCRIPT}?${SAS}"
+          chmod +x /tmp/startup.sh
+
+          echo "Executing startup.sh..."
+          /tmp/startup.sh "?${SAS}" "${ACCT}" "${CONT}" "${PREFIX}" "${ARTIFACT}"
+          REMOTE
