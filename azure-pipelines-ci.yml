@@ -1,33 +1,34 @@
-# azure-pipelines-ci.yml
 trigger:
   branches:
-    include:
-      - main
+    include: [ main ]
+
+resources:
+  repositories:
+  - repository: self
+    type: github
+    name: Thivagar007/HTS-L2-CS002
+    endpoint: github-hts-l2
+    ref: refs/heads/main
 
 pool:
-  name: my-agent-2   # your self-hosted VMSS agent
+  name: my-agent-2
 
 variables:
-  # Library group should contain:
-  #   storageAccountName (e.g., htsl2cs002sa)
-  #   storageContainer   (e.g., artifacts)
   - group: deployment-settings
-
   - name: buildDir
-    value: 'build-artifacts'
+    value: build-artifacts
   - name: artifactName
-    value: 'flask-app.zip'
-  # Versioned prefix helps DR traceability (branch/buildNumber)
+    value: flask-app.zip
   - name: blobPrefix
     value: 'flask/$(Build.SourceBranchName)/$(Build.BuildNumber)'
 
 stages:
 - stage: Build
-  displayName: 'Build & Package'
   jobs:
   - job: Build
-    displayName: 'Zip app and publish'
     steps:
+      - checkout: self
+        clean: true
       - bash: |
           set -e
           sudo apt-get update -y
